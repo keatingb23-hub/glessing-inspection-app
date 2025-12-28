@@ -7,7 +7,7 @@ export const runtime = "nodejs";
 function env(name: string) {
   const v = process.env[name];
   if (!v) throw new Error(`Missing env var: ${name}`);
-  return v.trim(); // <-- IMPORTANT: removes hidden newline/spaces from Vercel env vars
+  return v.trim();
 }
 
 function getAuth(scopes: string[]) {
@@ -26,7 +26,6 @@ function safeName(name: string) {
 async function getOrCreateStoreFolder(drive: any, parentFolderId: string, storeName: string) {
   const name = safeName(storeName);
 
-  // Find existing folder
   const q = [
     `'${parentFolderId}' in parents`,
     `mimeType='application/vnd.google-apps.folder'`,
@@ -39,12 +38,13 @@ async function getOrCreateStoreFolder(drive: any, parentFolderId: string, storeN
     fields: "files(id,name)",
     spaces: "drive",
     pageSize: 1,
+    supportsAllDrives: true,
+    includeItemsFromAllDrives: true,
   });
 
   const existing = res.data.files?.[0];
   if (existing?.id) return existing.id;
 
-  // Create folder
   const created = await drive.files.create({
     requestBody: {
       name,
@@ -52,6 +52,7 @@ async function getOrCreateStoreFolder(drive: any, parentFolderId: string, storeN
       parents: [parentFolderId],
     },
     fields: "id",
+    supportsAllDrives: true,
   });
 
   if (!created.data.id) throw new Error("Failed to create store folder");
@@ -64,7 +65,7 @@ async function uploadToDrive(file: File, storeName: string) {
 
   const intakeFolderId = env("DRIVE_INTAKE_FOLDER_ID");
 
-  // Put photos in a subfolder per store (matches your goal + matches your log behavior)
+  // Put photos in a store subfolder
   const storeFolderId = await getOrCreateStoreFolder(drive, intakeFolderId, storeName);
 
   const safeStore = safeName(storeName);
@@ -73,14 +74,13 @@ async function uploadToDrive(file: File, storeName: string) {
 
   const arrayBuffer = await file.arrayBuffer();
   const buffer = Buffer.from(arrayBuffer);
-
-  // IMPORTANT: googleapis expects a stream, not a Buffer
   const bodyStream = Readable.from(buffer);
 
   const created = await drive.files.create({
     requestBody: { name: filename, parents: [storeFolderId] },
     media: { mimeType: file.type || "image/jpeg", body: bodyStream },
     fields: "id, webViewLink",
+    supportsAllDrives: true,
   });
 
   const fileId = created.data.id;
@@ -90,6 +90,7 @@ async function uploadToDrive(file: File, storeName: string) {
   await drive.permissions.create({
     fileId,
     requestBody: { role: "reader", type: "anyone" },
+    supportsAllDrives: true,
   });
 
   return created.data.webViewLink || `https://drive.google.com/file/d/${fileId}/view`;
