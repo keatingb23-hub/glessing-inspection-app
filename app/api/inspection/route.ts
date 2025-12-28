@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { google } from "googleapis";
+import { Readable } from "stream";
 
 export const runtime = "nodejs";
 
@@ -11,26 +12,79 @@ function env(name: string) {
 
 function getAuth(scopes: string[]) {
   const email = env("GOOGLE_SERVICE_ACCOUNT_EMAIL");
+  // Vercel env var should store \n, convert to real newlines for JWT
   const key = env("GOOGLE_SERVICE_ACCOUNT_KEY").replace(/\\n/g, "\n");
-  return new google.auth.JWT({ email, key, scopes });
+  return new google.auth.JWT({
+    email,
+    key,
+    scopes,
+  });
+}
+
+/**
+ * Ensure there's a subfolder under the ROOT folder for the store name.
+ * Returns the folderId to upload into.
+ */
+async function getOrCreateStoreFolderId(drive: any, rootFolderId: string, storeName: string) {
+  const safeStore = (storeName || "Store").replace(/[^\w\s-]/g, "").trim() || "Store";
+
+  // Search for an existing folder with that name under the root folder
+  const res = await drive.files.list({
+    q: [
+      `'${rootFolderId}' in parents`,
+      `mimeType = 'application/vnd.google-apps.folder'`,
+      `name = '${safeStore.replace(/'/g, "\\'")}'`,
+      `trashed = false`,
+    ].join(" and "),
+    fields: "files(id, name)",
+    spaces: "drive",
+    pageSize: 1,
+  });
+
+  const found = res.data.files?.[0];
+  if (found?.id) return found.id;
+
+  // Create folder if not found
+  const created = await drive.files.create({
+    requestBody: {
+      name: safeStore,
+      mimeType: "application/vnd.google-apps.folder",
+      parents: [rootFolderId],
+    },
+    fields: "id",
+  });
+
+  const folderId = created.data.id;
+  if (!folderId) throw new Error("Failed to create store folder in Drive");
+  return folderId;
 }
 
 async function uploadToDrive(file: File, storeName: string) {
   const auth = getAuth(["https://www.googleapis.com/auth/drive"]);
   const drive = google.drive({ version: "v3", auth });
 
-  const folderId = env("DRIVE_INTAKE_FOLDER_ID");
+  const rootFolderId = env("DRIVE_INTAKE_FOLDER_ID");
+  const storeFolderId = await getOrCreateStoreFolderId(drive, rootFolderId, storeName);
 
-  const safeStore = (storeName || "Store").replace(/[^\w\s-]/g, "").trim();
+  const safeStore = (storeName || "Store").replace(/[^\w\s-]/g, "").trim() || "Store";
   const ext = (file.name.split(".").pop() || "jpg").toLowerCase();
   const filename = `${safeStore} - ${Date.now()}.${ext}`;
 
   const arrayBuffer = await file.arrayBuffer();
   const buffer = Buffer.from(arrayBuffer);
 
+  // ✅ googleapis expects a stream (pipe-able), not a Buffer
+  const stream = Readable.from(buffer);
+
   const created = await drive.files.create({
-    requestBody: { name: filename, parents: [folderId] },
-    media: { mimeType: file.type || "image/jpeg", body: buffer as any },
+    requestBody: {
+      name: filename,
+      parents: [storeFolderId],
+    },
+    media: {
+      mimeType: file.type || "image/jpeg",
+      body: stream,
+    },
     fields: "id, webViewLink",
   });
 
@@ -43,10 +97,7 @@ async function uploadToDrive(file: File, storeName: string) {
     requestBody: { role: "reader", type: "anyone" },
   });
 
-  const link =
-    created.data.webViewLink || `https://drive.google.com/file/d/${fileId}/view`;
-
-  return link;
+  return created.data.webViewLink || `https://drive.google.com/file/d/${fileId}/view`;
 }
 
 async function appendToSheet(row: any[]) {
@@ -71,29 +122,37 @@ export async function POST(req: Request) {
     const storeName = String(form.get("storeName") || "").trim();
     const storeAddress = String(form.get("storeAddress") || "").trim();
     const itemType = String(form.get("itemType") || "").trim();
-    const level = String(form.get("level") || "").trim();
+    const levelRaw = String(form.get("level") || "").trim();
     const notes = String(form.get("notes") || "").trim();
     const photo = form.get("photo") as File | null;
 
-    if (!storeName || !itemType || !level) {
+    if (!storeName || !itemType || !levelRaw) {
       return NextResponse.json(
         { error: "Store Name, Item Type, and Level are required." },
         { status: 400 }
       );
     }
 
+    const level = Number(levelRaw);
+    if (![1, 2, 3].includes(level)) {
+      return NextResponse.json(
+        { error: "Level must be 1, 2, or 3." },
+        { status: 400 }
+      );
+    }
+
     let photoUrl = "";
-    if (photo && photo.size > 0) {
+    if (photo && typeof photo.size === "number" && photo.size > 0) {
       photoUrl = await uploadToDrive(photo, storeName);
     }
 
-    // Your sheet columns A-F:
+    // Sheet columns A-F:
     // A Store Name | B Store Address | C Item Type | D Level | E Notes | F Photo
     await appendToSheet([
       storeName,
       storeAddress,
       itemType,
-      Number(level),
+      level,
       notes,
       photoUrl,
     ]);
