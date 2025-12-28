@@ -1,121 +1,79 @@
 import { NextResponse } from "next/server";
 import { google } from "googleapis";
-import { Readable } from "stream";
 
 export const runtime = "nodejs";
 
 function env(name: string) {
   const v = process.env[name];
   if (!v) throw new Error(`Missing env var: ${name}`);
-  return v.trim(); // important: avoids hidden newline issues
+  return v;
 }
 
 function getAuth(scopes: string[]) {
   const email = env("GOOGLE_SERVICE_ACCOUNT_EMAIL");
   const key = env("GOOGLE_SERVICE_ACCOUNT_KEY").replace(/\\n/g, "\n");
-  return new google.auth.JWT({
-    email,
-    key,
-    scopes,
-  });
+  return new google.auth.JWT({ email, key, scopes });
 }
 
-async function getDriveClient() {
-  const auth = getAuth(["https://www.googleapis.com/auth/drive"]);
-  return google.drive({ version: "v3", auth });
-}
-
-async function getSheetsClient() {
-  const auth = getAuth(["https://www.googleapis.com/auth/spreadsheets"]);
-  return google.sheets({ version: "v4", auth });
-}
-
-// Finds (or creates) a store subfolder under your DRIVE_INTAKE_FOLDER_ID
-async function getOrCreateStoreFolderId(drive: any, parentFolderId: string, storeName: string) {
-  const safeStore = (storeName || "Store")
+function cleanName(input: string) {
+  return (input || "Store")
     .replace(/[^\w\s-]/g, "")
-    .trim();
-
-  // IMPORTANT for Shared Drives
-  const listRes = await drive.files.list({
-    q: `'${parentFolderId}' in parents and mimeType='application/vnd.google-apps.folder' and name='${safeStore}' and trashed=false`,
-    fields: "files(id,name)",
-    spaces: "drive",
-    pageSize: 1,
-    includeItemsFromAllDrives: true,
-    supportsAllDrives: true,
-  });
-
-  const existing = listRes.data.files?.[0];
-  if (existing?.id) return existing.id;
-
-  const createRes = await drive.files.create({
-    requestBody: {
-      name: safeStore,
-      mimeType: "application/vnd.google-apps.folder",
-      parents: [parentFolderId],
-    },
-    fields: "id",
-    supportsAllDrives: true,
-  });
-
-  if (!createRes.data.id) throw new Error("Failed to create store folder");
-  return createRes.data.id;
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 80);
 }
 
 async function uploadToDrive(file: File, storeName: string) {
-  const drive = await getDriveClient();
+  const auth = getAuth(["https://www.googleapis.com/auth/drive"]);
+  const drive = google.drive({ version: "v3", auth });
 
-  const parentFolderId = env("DRIVE_INTAKE_FOLDER_ID");
-  const storeFolderId = await getOrCreateStoreFolderId(drive, parentFolderId, storeName);
+  const folderId = env("DRIVE_INTAKE_FOLDER_ID");
 
-  const safeStore = (storeName || "Store").replace(/[^\w\s-]/g, "").trim();
+  const safeStore = cleanName(storeName);
   const ext = (file.name.split(".").pop() || "jpg").toLowerCase();
   const filename = `${safeStore} - ${Date.now()}.${ext}`;
 
   const arrayBuffer = await file.arrayBuffer();
   const buffer = Buffer.from(arrayBuffer);
 
-  // Drive expects a STREAM (this fixes: t.body.pipe is not a function)
-  const mediaBody = Readable.from(buffer);
-
   const created = await drive.files.create({
+    supportsAllDrives: true, // IMPORTANT for Shared Drives
     requestBody: {
       name: filename,
-      parents: [storeFolderId],
+      parents: [folderId],
     },
     media: {
       mimeType: file.type || "image/jpeg",
-      body: mediaBody,
+      body: buffer as any,
     },
     fields: "id, webViewLink",
-    supportsAllDrives: true,
   });
 
   const fileId = created.data.id;
   if (!fileId) throw new Error("Drive upload failed (missing file ID)");
 
-  // IMPORTANT:
-  // We DO NOT set "anyone with link" permissions here.
-  // Shared Drives often block per-file permission changes (your error).
-  // Instead, make the parent folder shareable once in Drive settings.
+  // NOTE:
+  // Do NOT change permissions here. Shared Drives often inherit permissions
+  // and Drive will throw "cannotModifyInheritedPermission".
+  // Keep your Shared Drive / folder sharing settings as the source of truth.
 
   const link =
     created.data.webViewLink || `https://drive.google.com/file/d/${fileId}/view`;
 
-  return link;
+  return { link, filename };
 }
 
 async function appendToSheet(row: any[]) {
-  const sheets = await getSheetsClient();
+  const auth = getAuth(["https://www.googleapis.com/auth/spreadsheets"]);
+  const sheets = google.sheets({ version: "v4", auth });
 
   const spreadsheetId = env("SPREADSHEET_ID");
-  const sheetName = env("SHEET_NAME"); // must match the TAB name exactly
+  const sheetName = env("SHEET_NAME");
 
   await sheets.spreadsheets.values.append({
     spreadsheetId,
-    range: `${sheetName}!A:F`,
-    valueInputOption: "USER_ENTERED",
+    range: `${sheetName}!A:I`, // your sheet has A-I headers in your screenshot
+    valueInputOption: "USER_ENTERED", // allows formulas like HYPERLINK()
     requestBody: { values: [row] },
   });
 }
@@ -138,26 +96,42 @@ export async function POST(req: Request) {
       );
     }
 
-    let photoUrl = "";
+    // PHOTO CELL VALUE (Column F)
+    // If photo uploaded: put clickable filename instead of raw URL
+    let photoCell = "";
     if (photo && photo.size > 0) {
-      photoUrl = await uploadToDrive(photo, storeName);
+      const { link, filename } = await uploadToDrive(photo, storeName);
+
+      // Escape quotes for Sheets formula safety
+      const safeFilename = filename.replace(/"/g, '""');
+      const safeLink = link.replace(/"/g, "%22");
+
+      photoCell = `=HYPERLINK("${safeLink}","${safeFilename}")`;
     }
 
+    // Your sheet columns (from screenshot):
     // A Store Name | B Store Address | C Item Type | D Level | E Notes | F Photo
+    // G (Internal) Brand | H (Internal) Measurement | I (Internal) Notes
     await appendToSheet([
-      storeName,
-      storeAddress,
-      itemType,
-      Number(level),
-      notes,
-      photoUrl,
+      storeName, // A
+      storeAddress, // B
+      itemType, // C
+      Number(level), // D
+      notes, // E
+      photoCell, // F
+      "", // G
+      "", // H
+      "", // I
     ]);
 
-    return NextResponse.json({ ok: true, photoUrl });
+    return NextResponse.json({ ok: true });
   } catch (err: any) {
     console.error(err);
     return NextResponse.json(
-      { error: "Failed to submit inspection.", details: err?.message || String(err) },
+      {
+        error: "Failed to submit inspection.",
+        details: err?.message || String(err),
+      },
       { status: 500 }
     );
   }
