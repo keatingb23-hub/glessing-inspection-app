@@ -7,47 +7,51 @@ export const runtime = "nodejs";
 function env(name: string) {
   const v = process.env[name];
   if (!v) throw new Error(`Missing env var: ${name}`);
-  return v.trim();
+  return v.trim(); // important: avoids hidden newline issues
 }
 
 function getAuth(scopes: string[]) {
   const email = env("GOOGLE_SERVICE_ACCOUNT_EMAIL");
-  const key = env("GOOGLE_SERVICE_ACCOUNT_KEY").replace(/\\n/g, "\n").trim();
-  return new google.auth.JWT({ email, key, scopes });
+  const key = env("GOOGLE_SERVICE_ACCOUNT_KEY").replace(/\\n/g, "\n");
+  return new google.auth.JWT({
+    email,
+    key,
+    scopes,
+  });
 }
 
-function safeName(name: string) {
-  return (name || "Store")
+async function getDriveClient() {
+  const auth = getAuth(["https://www.googleapis.com/auth/drive"]);
+  return google.drive({ version: "v3", auth });
+}
+
+async function getSheetsClient() {
+  const auth = getAuth(["https://www.googleapis.com/auth/spreadsheets"]);
+  return google.sheets({ version: "v4", auth });
+}
+
+// Finds (or creates) a store subfolder under your DRIVE_INTAKE_FOLDER_ID
+async function getOrCreateStoreFolderId(drive: any, parentFolderId: string, storeName: string) {
+  const safeStore = (storeName || "Store")
     .replace(/[^\w\s-]/g, "")
-    .replace(/\s+/g, " ")
     .trim();
-}
 
-async function getOrCreateStoreFolder(drive: any, parentFolderId: string, storeName: string) {
-  const name = safeName(storeName);
-
-  const q = [
-    `'${parentFolderId}' in parents`,
-    `mimeType='application/vnd.google-apps.folder'`,
-    `name='${name.replace(/'/g, "\\'")}'`,
-    `trashed=false`,
-  ].join(" and ");
-
-  const res = await drive.files.list({
-    q,
+  // IMPORTANT for Shared Drives
+  const listRes = await drive.files.list({
+    q: `'${parentFolderId}' in parents and mimeType='application/vnd.google-apps.folder' and name='${safeStore}' and trashed=false`,
     fields: "files(id,name)",
     spaces: "drive",
     pageSize: 1,
-    supportsAllDrives: true,
     includeItemsFromAllDrives: true,
+    supportsAllDrives: true,
   });
 
-  const existing = res.data.files?.[0];
+  const existing = listRes.data.files?.[0];
   if (existing?.id) return existing.id;
 
-  const created = await drive.files.create({
+  const createRes = await drive.files.create({
     requestBody: {
-      name,
+      name: safeStore,
       mimeType: "application/vnd.google-apps.folder",
       parents: [parentFolderId],
     },
@@ -55,30 +59,35 @@ async function getOrCreateStoreFolder(drive: any, parentFolderId: string, storeN
     supportsAllDrives: true,
   });
 
-  if (!created.data.id) throw new Error("Failed to create store folder");
-  return created.data.id;
+  if (!createRes.data.id) throw new Error("Failed to create store folder");
+  return createRes.data.id;
 }
 
 async function uploadToDrive(file: File, storeName: string) {
-  const auth = getAuth(["https://www.googleapis.com/auth/drive"]);
-  const drive = google.drive({ version: "v3", auth });
+  const drive = await getDriveClient();
 
-  const intakeFolderId = env("DRIVE_INTAKE_FOLDER_ID");
+  const parentFolderId = env("DRIVE_INTAKE_FOLDER_ID");
+  const storeFolderId = await getOrCreateStoreFolderId(drive, parentFolderId, storeName);
 
-  // Put photos in a store subfolder
-  const storeFolderId = await getOrCreateStoreFolder(drive, intakeFolderId, storeName);
-
-  const safeStore = safeName(storeName);
+  const safeStore = (storeName || "Store").replace(/[^\w\s-]/g, "").trim();
   const ext = (file.name.split(".").pop() || "jpg").toLowerCase();
   const filename = `${safeStore} - ${Date.now()}.${ext}`;
 
   const arrayBuffer = await file.arrayBuffer();
   const buffer = Buffer.from(arrayBuffer);
-  const bodyStream = Readable.from(buffer);
+
+  // Drive expects a STREAM (this fixes: t.body.pipe is not a function)
+  const mediaBody = Readable.from(buffer);
 
   const created = await drive.files.create({
-    requestBody: { name: filename, parents: [storeFolderId] },
-    media: { mimeType: file.type || "image/jpeg", body: bodyStream },
+    requestBody: {
+      name: filename,
+      parents: [storeFolderId],
+    },
+    media: {
+      mimeType: file.type || "image/jpeg",
+      body: mediaBody,
+    },
     fields: "id, webViewLink",
     supportsAllDrives: true,
   });
@@ -86,22 +95,22 @@ async function uploadToDrive(file: File, storeName: string) {
   const fileId = created.data.id;
   if (!fileId) throw new Error("Drive upload failed (missing file ID)");
 
-  // Make shareable
-  await drive.permissions.create({
-    fileId,
-    requestBody: { role: "reader", type: "anyone" },
-    supportsAllDrives: true,
-  });
+  // IMPORTANT:
+  // We DO NOT set "anyone with link" permissions here.
+  // Shared Drives often block per-file permission changes (your error).
+  // Instead, make the parent folder shareable once in Drive settings.
 
-  return created.data.webViewLink || `https://drive.google.com/file/d/${fileId}/view`;
+  const link =
+    created.data.webViewLink || `https://drive.google.com/file/d/${fileId}/view`;
+
+  return link;
 }
 
 async function appendToSheet(row: any[]) {
-  const auth = getAuth(["https://www.googleapis.com/auth/spreadsheets"]);
-  const sheets = google.sheets({ version: "v4", auth });
+  const sheets = await getSheetsClient();
 
   const spreadsheetId = env("SPREADSHEET_ID");
-  const sheetName = env("SHEET_NAME");
+  const sheetName = env("SHEET_NAME"); // must match the TAB name exactly
 
   await sheets.spreadsheets.values.append({
     spreadsheetId,
@@ -134,6 +143,7 @@ export async function POST(req: Request) {
       photoUrl = await uploadToDrive(photo, storeName);
     }
 
+    // A Store Name | B Store Address | C Item Type | D Level | E Notes | F Photo
     await appendToSheet([
       storeName,
       storeAddress,
