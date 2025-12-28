@@ -1,84 +1,85 @@
 import { NextResponse } from "next/server";
 import { google } from "googleapis";
-import { PassThrough } from "stream";
+import { Readable } from "stream";
 
 export const runtime = "nodejs";
 
 function env(name: string) {
   const v = process.env[name];
   if (!v) throw new Error(`Missing env var: ${name}`);
-  return v;
+  return v.trim(); // <-- IMPORTANT: removes hidden newline/spaces from Vercel env vars
 }
 
 function getAuth(scopes: string[]) {
   const email = env("GOOGLE_SERVICE_ACCOUNT_EMAIL");
-  const key = env("GOOGLE_SERVICE_ACCOUNT_KEY").replace(/\\n/g, "\n");
+  const key = env("GOOGLE_SERVICE_ACCOUNT_KEY").replace(/\\n/g, "\n").trim();
   return new google.auth.JWT({ email, key, scopes });
 }
 
-async function getOrCreateStoreFolderId(drive: any, rootFolderId: string, storeName: string) {
-  const safeStore =
-    (storeName || "Store").replace(/[^\w\s-]/g, "").trim() || "Store";
+function safeName(name: string) {
+  return (name || "Store")
+    .replace(/[^\w\s-]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
 
-  const escaped = safeStore.replace(/'/g, "\\'");
+async function getOrCreateStoreFolder(drive: any, parentFolderId: string, storeName: string) {
+  const name = safeName(storeName);
+
+  // Find existing folder
+  const q = [
+    `'${parentFolderId}' in parents`,
+    `mimeType='application/vnd.google-apps.folder'`,
+    `name='${name.replace(/'/g, "\\'")}'`,
+    `trashed=false`,
+  ].join(" and ");
 
   const res = await drive.files.list({
-    q: [
-      `'${rootFolderId}' in parents`,
-      `mimeType='application/vnd.google-apps.folder'`,
-      `name='${escaped}'`,
-      `trashed=false`,
-    ].join(" and "),
+    q,
     fields: "files(id,name)",
     spaces: "drive",
     pageSize: 1,
   });
 
-  const found = res.data.files?.[0];
-  if (found?.id) return found.id;
+  const existing = res.data.files?.[0];
+  if (existing?.id) return existing.id;
 
+  // Create folder
   const created = await drive.files.create({
     requestBody: {
-      name: safeStore,
+      name,
       mimeType: "application/vnd.google-apps.folder",
-      parents: [rootFolderId],
+      parents: [parentFolderId],
     },
     fields: "id",
   });
 
-  const folderId = created.data.id;
-  if (!folderId) throw new Error("Failed to create store folder in Drive");
-  return folderId;
+  if (!created.data.id) throw new Error("Failed to create store folder");
+  return created.data.id;
 }
 
 async function uploadToDrive(file: File, storeName: string) {
   const auth = getAuth(["https://www.googleapis.com/auth/drive"]);
   const drive = google.drive({ version: "v3", auth });
 
-  const rootFolderId = env("DRIVE_INTAKE_FOLDER_ID");
-  const storeFolderId = await getOrCreateStoreFolderId(drive, rootFolderId, storeName);
+  const intakeFolderId = env("DRIVE_INTAKE_FOLDER_ID");
 
-  const safeStore =
-    (storeName || "Store").replace(/[^\w\s-]/g, "").trim() || "Store";
+  // Put photos in a subfolder per store (matches your goal + matches your log behavior)
+  const storeFolderId = await getOrCreateStoreFolder(drive, intakeFolderId, storeName);
+
+  const safeStore = safeName(storeName);
   const ext = (file.name.split(".").pop() || "jpg").toLowerCase();
   const filename = `${safeStore} - ${Date.now()}.${ext}`;
 
   const arrayBuffer = await file.arrayBuffer();
   const buffer = Buffer.from(arrayBuffer);
 
-  // ✅ MUST be a real Node stream with .pipe()
-  const stream = new PassThrough();
-  stream.end(buffer);
+  // IMPORTANT: googleapis expects a stream, not a Buffer
+  const bodyStream = Readable.from(buffer);
 
   const created = await drive.files.create({
-    requestBody: {
-      name: filename,
-      parents: [storeFolderId],
-    },
-    media: {
-      mimeType: file.type || "image/jpeg",
-      body: stream,
-    },
+    requestBody: { name: filename, parents: [storeFolderId] },
+    media: { mimeType: file.type || "image/jpeg", body: bodyStream },
     fields: "id, webViewLink",
   });
 
@@ -116,27 +117,19 @@ export async function POST(req: Request) {
     const storeName = String(form.get("storeName") || "").trim();
     const storeAddress = String(form.get("storeAddress") || "").trim();
     const itemType = String(form.get("itemType") || "").trim();
-    const levelRaw = String(form.get("level") || "").trim();
+    const level = String(form.get("level") || "").trim();
     const notes = String(form.get("notes") || "").trim();
     const photo = form.get("photo") as File | null;
 
-    if (!storeName || !itemType || !levelRaw) {
+    if (!storeName || !itemType || !level) {
       return NextResponse.json(
         { error: "Store Name, Item Type, and Level are required." },
         { status: 400 }
       );
     }
 
-    const level = Number(levelRaw);
-    if (![1, 2, 3].includes(level)) {
-      return NextResponse.json(
-        { error: "Level must be 1, 2, or 3." },
-        { status: 400 }
-      );
-    }
-
     let photoUrl = "";
-    if (photo && typeof photo.size === "number" && photo.size > 0) {
+    if (photo && photo.size > 0) {
       photoUrl = await uploadToDrive(photo, storeName);
     }
 
@@ -144,7 +137,7 @@ export async function POST(req: Request) {
       storeName,
       storeAddress,
       itemType,
-      level,
+      Number(level),
       notes,
       photoUrl,
     ]);
