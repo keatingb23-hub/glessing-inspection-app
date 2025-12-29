@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { google } from "googleapis";
+import { Readable } from "stream";
 
 export const runtime = "nodejs";
 
@@ -15,50 +16,92 @@ function getAuth(scopes: string[]) {
   return new google.auth.JWT({ email, key, scopes });
 }
 
-function cleanName(input: string) {
-  return (input || "Store")
+function safeFolderName(name: string) {
+  return (name || "Store")
     .replace(/[^\w\s-]/g, "")
-    .replace(/\s+/g, " ")
     .trim()
     .slice(0, 80);
+}
+
+async function getOrCreateStoreFolderId(
+  drive: any,
+  parentFolderId: string,
+  storeName: string
+) {
+  const folderName = safeFolderName(storeName);
+
+  // Look for existing folder
+  const found = await drive.files.list({
+    q: `'${parentFolderId}' in parents and mimeType='application/vnd.google-apps.folder' and name='${folderName}' and trashed=false`,
+    fields: "files(id,name)",
+    pageSize: 1,
+    supportsAllDrives: true,
+    includeItemsFromAllDrives: true,
+  });
+
+  const existingId = found.data.files?.[0]?.id;
+  if (existingId) return existingId;
+
+  // Create folder
+  const created = await drive.files.create({
+    requestBody: {
+      name: folderName,
+      mimeType: "application/vnd.google-apps.folder",
+      parents: [parentFolderId],
+    },
+    fields: "id",
+    supportsAllDrives: true,
+  });
+
+  const newId = created.data.id;
+  if (!newId) throw new Error("Failed to create store folder (missing id)");
+  return newId;
 }
 
 async function uploadToDrive(file: File, storeName: string) {
   const auth = getAuth(["https://www.googleapis.com/auth/drive"]);
   const drive = google.drive({ version: "v3", auth });
 
-  const folderId = env("DRIVE_INTAKE_FOLDER_ID");
+  const parentFolderId = env("DRIVE_INTAKE_FOLDER_ID");
+  const storeFolderId = await getOrCreateStoreFolderId(
+    drive,
+    parentFolderId,
+    storeName
+  );
 
-  const safeStore = cleanName(storeName);
+  const safeStore = safeFolderName(storeName);
   const ext = (file.name.split(".").pop() || "jpg").toLowerCase();
   const filename = `${safeStore} - ${Date.now()}.${ext}`;
 
   const arrayBuffer = await file.arrayBuffer();
   const buffer = Buffer.from(arrayBuffer);
 
+  // IMPORTANT: googleapis expects a stream body (pipeable)
+  const stream = Readable.from(buffer);
+
   const created = await drive.files.create({
-    supportsAllDrives: true, // IMPORTANT for Shared Drives
     requestBody: {
       name: filename,
-      parents: [folderId],
+      parents: [storeFolderId],
     },
     media: {
       mimeType: file.type || "image/jpeg",
-      body: buffer as any,
+      body: stream as any,
     },
     fields: "id, webViewLink",
+    supportsAllDrives: true,
   });
 
   const fileId = created.data.id;
   if (!fileId) throw new Error("Drive upload failed (missing file ID)");
 
-  // NOTE:
-  // Do NOT change permissions here. Shared Drives often inherit permissions
-  // and Drive will throw "cannotModifyInheritedPermission".
-  // Keep your Shared Drive / folder sharing settings as the source of truth.
-
   const link =
     created.data.webViewLink || `https://drive.google.com/file/d/${fileId}/view`;
+
+  // NOTE:
+  // Do NOT try to change permissions here for Shared Drives.
+  // It often throws "cannotModifyInheritedPermission" and breaks the request.
+  // Sharing is controlled at the Shared Drive / folder level.
 
   return { link, filename };
 }
@@ -72,8 +115,8 @@ async function appendToSheet(row: any[]) {
 
   await sheets.spreadsheets.values.append({
     spreadsheetId,
-    range: `${sheetName}!A:I`, // your sheet has A-I headers in your screenshot
-    valueInputOption: "USER_ENTERED", // allows formulas like HYPERLINK()
+    range: `${sheetName}!A:I`, // your sheet has A..I headers
+    valueInputOption: "USER_ENTERED",
     requestBody: { values: [row] },
   });
 }
@@ -96,32 +139,32 @@ export async function POST(req: Request) {
       );
     }
 
-    // PHOTO CELL VALUE (Column F)
-    // If photo uploaded: put clickable filename instead of raw URL
     let photoCell = "";
     if (photo && photo.size > 0) {
       const { link, filename } = await uploadToDrive(photo, storeName);
 
-      // Escape quotes for Sheets formula safety
-      const safeFilename = filename.replace(/"/g, '""');
-      const safeLink = link.replace(/"/g, "%22");
-
-      photoCell = `=HYPERLINK("${safeLink}","${safeFilename}")`;
+      // Shows filename in the sheet, but it's clickable (best of both worlds)
+      // This also tends to play nicer with sheet triggers than a raw URL string.
+      photoCell = `=HYPERLINK("${link}","${filename}")`;
     }
 
-    // Your sheet columns (from screenshot):
-    // A Store Name | B Store Address | C Item Type | D Level | E Notes | F Photo
-    // G (Internal) Brand | H (Internal) Measurement | I (Internal) Notes
+    // A: Store Name
+    // B: Store Address
+    // C: Item Type
+    // D: Level
+    // E: Notes
+    // F: Photo
+    // G/H/I internal columns (leave blank unless you’re using them)
     await appendToSheet([
-      storeName, // A
-      storeAddress, // B
-      itemType, // C
-      Number(level), // D
-      notes, // E
-      photoCell, // F
-      "", // G
-      "", // H
-      "", // I
+      storeName,
+      storeAddress,
+      itemType,
+      Number(level),
+      notes,
+      photoCell,
+      "",
+      "",
+      "",
     ]);
 
     return NextResponse.json({ ok: true });
