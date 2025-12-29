@@ -1,7 +1,9 @@
 {
   "name": "Glessing Inspection App",
-  "short_name": "Inspection",
+  "short_name": "Inspections",
+  "description": "Mobile inspection entry app for Glessing Gaskets",
   "start_url": "/",
+  "scope": "/",
   "display": "standalone",
   "background_color": "#0b1220",
   "theme_color": "#0b1220",
