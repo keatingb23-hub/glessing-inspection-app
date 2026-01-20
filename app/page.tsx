@@ -1,6 +1,7 @@
 "use client";
 
 import { useMemo, useState } from "react";
+import InspectionHeader from "./components/InspectionHeader";
 
 const ITEM_TYPES = [
   "Display Case Gasket",
@@ -28,7 +29,10 @@ export default function Page() {
   const [status, setStatus] = useState<"idle" | "saving" | "ok" | "err">("idle");
   const [msg, setMsg] = useState("");
 
-  const canSubmit = useMemo(() => storeName.trim() && itemType && level, [storeName, itemType, level]);
+  const canSubmit = useMemo(
+    () => storeName.trim() && itemType && level,
+    [storeName, itemType, level]
+  );
 
   async function submit() {
     setStatus("saving");
@@ -43,14 +47,17 @@ export default function Page() {
       fd.append("notes", notes);
       if (photoFile) fd.append("photo", photoFile);
 
-      const res = await fetch("/api/inspection", { method: "POST", body: fd });
+      const res = await fetch("/api/inspection", {
+        method: "POST",
+        body: fd,
+      });
+
       const json = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(json?.error || "Submit failed");
 
       setStatus("ok");
       setMsg("Saved ✔");
 
-      // keep store fields, clear the line item fields
       setItemType("");
       setLevel("");
       setNotes("");
@@ -62,21 +69,41 @@ export default function Page() {
   }
 
   return (
-    <main style={{ minHeight: "100vh", background: "#f1f5f9", padding: 16, fontFamily: "system-ui" }}>
-      <div style={{ maxWidth: 560, margin: "0 auto", background: "white", borderRadius: 16, padding: 16, boxShadow: "0 6px 18px rgba(0,0,0,0.08)" }}>
-        <h1 style={{ fontSize: 22, fontWeight: 800, margin: 0 }}>Inspection Entry</h1>
-        <p style={{ marginTop: 6, color: "#475569" }}>
-          Mobile form → writes to your Inspection Sheet → your quote automation runs as usual.
-        </p>
+    <main
+      style={{
+        minHeight: "100vh",
+        background: "#f1f5f9",
+        padding: 16,
+        fontFamily: "system-ui",
+      }}
+    >
+      <div
+        style={{
+          maxWidth: 560,
+          margin: "0 auto",
+          background: "white",
+          borderRadius: 16,
+          padding: 16,
+          boxShadow: "0 6px 18px rgba(0,0,0,0.08)",
+        }}
+      >
+        {/* Header (Logo + Inspection Entry) */}
+        <InspectionHeader />
 
-        <div style={{ display: "grid", gap: 12, marginTop: 12 }}>
+        <div style={{ display: "grid", gap: 12 }}>
           <div>
             <label style={{ fontWeight: 700 }}>Store Name *</label>
             <input
               value={storeName}
               onChange={(e) => setStoreName(e.target.value)}
               placeholder="e.g., Metro #83"
-              style={{ width: "100%", marginTop: 6, padding: 12, borderRadius: 12, border: "1px solid #cbd5e1" }}
+              style={{
+                width: "100%",
+                marginTop: 6,
+                padding: 12,
+                borderRadius: 12,
+                border: "1px solid #cbd5e1",
+              }}
             />
           </div>
 
@@ -86,7 +113,13 @@ export default function Page() {
               value={storeAddress}
               onChange={(e) => setStoreAddress(e.target.value)}
               placeholder="123 Main St"
-              style={{ width: "100%", marginTop: 6, padding: 12, borderRadius: 12, border: "1px solid #cbd5e1" }}
+              style={{
+                width: "100%",
+                marginTop: 6,
+                padding: 12,
+                borderRadius: 12,
+                border: "1px solid #cbd5e1",
+              }}
             />
           </div>
 
@@ -95,11 +128,19 @@ export default function Page() {
             <select
               value={itemType}
               onChange={(e) => setItemType(e.target.value)}
-              style={{ width: "100%", marginTop: 6, padding: 12, borderRadius: 12, border: "1px solid #cbd5e1" }}
+              style={{
+                width: "100%",
+                marginTop: 6,
+                padding: 12,
+                borderRadius: 12,
+                border: "1px solid #cbd5e1",
+              }}
             >
               <option value="">Select…</option>
               {ITEM_TYPES.map((t) => (
-                <option key={t} value={t}>{t}</option>
+                <option key={t} value={t}>
+                  {t}
+                </option>
               ))}
             </select>
           </div>
@@ -135,7 +176,13 @@ export default function Page() {
               onChange={(e) => setNotes(e.target.value)}
               rows={3}
               placeholder="Optional…"
-              style={{ width: "100%", marginTop: 6, padding: 12, borderRadius: 12, border: "1px solid #cbd5e1" }}
+              style={{
+                width: "100%",
+                marginTop: 6,
+                padding: 12,
+                borderRadius: 12,
+                border: "1px solid #cbd5e1",
+              }}
             />
           </div>
 
@@ -145,11 +192,20 @@ export default function Page() {
               type="file"
               accept="image/*"
               capture="environment"
-              onChange={(e) => setPhotoFile(e.target.files?.[0] || null)}
+              onChange={(e) =>
+                setPhotoFile(e.target.files?.[0] || null)
+              }
               style={{ width: "100%", marginTop: 6 }}
             />
-            <div style={{ fontSize: 12, color: "#64748b", marginTop: 6 }}>
-              Taps the camera on mobile. Uploads to Drive and links back into the sheet.
+            <div
+              style={{
+                fontSize: 12,
+                color: "#64748b",
+                marginTop: 6,
+              }}
+            >
+              Taps the camera on mobile. Uploads to Drive and links
+              back into the sheet.
             </div>
           </div>
 
@@ -165,20 +221,33 @@ export default function Page() {
               background: "#0f172a",
               color: "white",
               fontWeight: 900,
-              opacity: !canSubmit || status === "saving" ? 0.6 : 1,
+              opacity:
+                !canSubmit || status === "saving" ? 0.6 : 1,
             }}
           >
             {status === "saving" ? "Saving…" : "Save Item"}
           </button>
 
           {msg ? (
-            <div style={{
-              padding: 12,
-              borderRadius: 12,
-              background: status === "ok" ? "#dcfce7" : status === "err" ? "#fee2e2" : "#f1f5f9",
-              color: status === "ok" ? "#166534" : status === "err" ? "#991b1b" : "#0f172a",
-              fontWeight: 700
-            }}>
+            <div
+              style={{
+                padding: 12,
+                borderRadius: 12,
+                background:
+                  status === "ok"
+                    ? "#dcfce7"
+                    : status === "err"
+                    ? "#fee2e2"
+                    : "#f1f5f9",
+                color:
+                  status === "ok"
+                    ? "#166534"
+                    : status === "err"
+                    ? "#991b1b"
+                    : "#0f172a",
+                fontWeight: 700,
+              }}
+            >
               {msg}
             </div>
           ) : null}
