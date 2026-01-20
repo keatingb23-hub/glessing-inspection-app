@@ -2,22 +2,35 @@ import Image from "next/image";
 
 export default function InspectionHeader() {
   return (
-    <div className="mb-6">
-      <div className="flex items-center gap-4">
+    <div style={{ marginBottom: 16 }}>
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: 16,
+        }}
+      >
         {/* Logo */}
-        <div className="flex-shrink-0">
+        <div style={{ flexShrink: 0 }}>
           <Image
             src="/GlessingLOGO1.png"
             alt="Glessing Gaskets"
-            width={120}
-            height={60}
+            width={110}
+            height={55}
             priority
           />
         </div>
 
         {/* Title */}
-        <div className="flex flex-col justify-center">
-          <h1 className="text-2xl font-semibold text-gray-900">
+        <div>
+          <h1
+            style={{
+              fontSize: 22,
+              fontWeight: 800,
+              margin: 0,
+              color: "#0f172a",
+            }}
+          >
             Inspection Entry
           </h1>
         </div>
